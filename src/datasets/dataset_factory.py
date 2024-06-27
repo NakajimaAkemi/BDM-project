@@ -1,12 +1,11 @@
 import json
 from typing import Any
-from pydantic import BaseModel
+from pydantic_factories import ModelFactory
 from src.datasets.dataset import Dataset, DatasetAttribute
 
-
-class DatasetsFactory(BaseModel):
+class DatasetsFactory(ModelFactory[Any]):
     @staticmethod
-    def build_dataset(dataset_name: str) -> Any:
+    def build_dataset(dataset_name:str) -> Any:
         try:
             ds = Dataset.get_dataset_by_name(dataset_name)
             print(ds, dataset_name)
@@ -15,3 +14,4 @@ class DatasetsFactory(BaseModel):
             return ds
         except AssertionError as e:
             print(e)
+ 

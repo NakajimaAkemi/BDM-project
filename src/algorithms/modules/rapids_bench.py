@@ -7,10 +7,8 @@ import cudf
 import pandas as pd
 import re
 import unicodedata
-import rmm
-import cupy
 
-rmm.reinitialize(managed_memory=True)
+cudf.set_allocator("managed")
 
 class RapidsBench(AbstractAlgorithm):
     df_ = None
@@ -217,6 +215,7 @@ class RapidsBench(AbstractAlgorithm):
 
         self.df_ = cudf.concat([self.df_.drop(columns=columns), dummies], axis=1)
         
+        #print(self.df_.columns)
         return self.df_
         
     @timing
@@ -276,10 +275,7 @@ class RapidsBench(AbstractAlgorithm):
         for column, dtype in dtypes.items():
             if column in self.df_.columns:
                 if dtype == "datetime64[ns]":
-                    
-                    self.df_[column] = cudf.to_datetime(self.df_[column])
-                elif dtype == "timedelta64[ns]":
-                    self.df_.column = cudf.TimedeltaIndex(self.df_[column], dtype="timedelta64[ns]")
+                    self.df_[column] = cudf.to_datetime(self.df_[column], format='%Y/%m/%dT%H:%M:%S')
                 else:
                     self.df_[column] = self.df_[column].astype(dtype)
 
@@ -346,7 +342,7 @@ class RapidsBench(AbstractAlgorithm):
         self.df_ = self.df_.drop(matching_rows.index)
         return self.df_
     
-    @timing
+    @timing    
     def change_date_time_format(self, column, format):
         """
         Change the date/time format of the provided column
@@ -354,11 +350,8 @@ class RapidsBench(AbstractAlgorithm):
         column datatype must be datetime
         An example of format is '%m/%d/%Y'
         """
-        
-        try:
-            self.df_[column] = cudf.to_datetime(self.df_[column].astype(str), format=format)
-        except:
-            self.df_[column] = cudf.from_pandas(pd.to_datetime(self.df_[column].to_pandas(), format=format))
+        if self.df_[column].dtype != "datetime64[ns]":
+            self.df_[column] = cudf.to_datetime(self.df_[column], errors='coerce')
         self.df_[column] = self.df_[column].dt.strftime(format)
         return self.df_
       
@@ -504,23 +497,17 @@ class RapidsBench(AbstractAlgorithm):
         return self.df_
         
     @timing   
-    def calc_column(self, col_name, f, columns=None, apply=False):
+    def calc_column(self, col_name, columns, f):
         """
         Calculate the new column col_name by applying
         the function f to the whole dataframe
         """
-        if not columns:
-            columns = self.df_.columns
-        print(f)
-        if apply:
-            if type(f) == str:
-                f = eval(f)
-                print(f)
-            print( f(self.df_[columns]))
-            self.df_[col_name] = f(self.df_[columns])
-        else:
-            if type(f) == str:
-                self.df_[col_name] = eval(f)
+        if type(f) == str:
+            f = eval(f)
+        try:
+             self.df_[col_name] = f(self.df_[columns])
+        except Exception as e:
+             self.df_[col_name] = self.df_[columns].to_pandas().apply(f, axis=1)
         return self.df_
       
     @timing  
@@ -537,16 +524,15 @@ class RapidsBench(AbstractAlgorithm):
         return self.df_
     
     @timing    
-    def groupby(self, columns, f, cast=None):
+    def groupby(self, columns, f, query=None):
         """
         Aggregate the dataframe by the provided columns
-        then applies the specified function f on every group.
-        The function f can be a string representing a pandas DataFrameGroupBy method with arguments.
+        then applies the function f on every group
         """
-        # Define the allowed aggregation methods and their corresponding functions
-        result = self.df_.groupby(columns).agg(f)
-
-        return result
+        if query:
+            filtered = self.df_.query(query).groupby(columns)
+            return filtered.agg(f)    
+        return self.df_.groupby(columns).agg(f)
         
     @timing
     def categorical_encoding(self, columns):
@@ -595,7 +581,7 @@ class RapidsBench(AbstractAlgorithm):
         Edit the values of the cells in the provided columns using the provided expression
         Columns is a list of column names
         """
-
+        #print("WARNING: don't work with string type columns")
         func = eval(func)
         for c in columns:
             if str(self.df_[c].dtype) in {'object', 'string'}:
@@ -694,7 +680,7 @@ class RapidsBench(AbstractAlgorithm):
     
     @timing
     def done(self):
-        del self.df_
+        pass
         
     @timing
     def set_construtor_args(self, args):

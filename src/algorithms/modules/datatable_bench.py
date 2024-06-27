@@ -623,8 +623,14 @@ class DataTableBench(AbstractAlgorithm):
         Regex is a boolean: if true, to_replace is interpreted as a regex
         Columns is a list of column names
         """
-        for c in columns:
-            self.df_[c] = dt.ifelse(dt.f[c] == to_replace, value, dt.f[c])
+        if type(to_replace) == list or type(value) == list:
+            # for multiple columns ifelse
+            for c in columns:
+                conditions = [p for couple in list(zip(to_replace, value)) for p in (dt.f[c] == couple[0], couple[1])]
+                self.df_[c] = dt.ifelse(*conditions, None)
+        else:
+            for c in columns:
+                self.df_[c] = dt.ifelse(dt.f[c] == to_replace, value, dt.f[c])
             
         return self.df_
     
@@ -707,6 +713,18 @@ class DataTableBench(AbstractAlgorithm):
             self.df_ = self.df_[eval(query), :]
             return self.df_
         return self.df_[eval(query), :]
+
+    @timing
+    def loc(self, column_list, row_condition=None):
+        if type(row_condition) is str: 
+            row_condition = eval(row_condition)
+        if row_condition is None:
+            self.df_ = self.df_[:, column_list]
+        elif column_list is None:
+            self.df_ = self.df_[row_condition] # e non column_list 
+        else:
+            self.df_ = self.df_[row_condition, column_list]
+        return self.df_
     
     def force_execution(self):
         self.df_.materialize()

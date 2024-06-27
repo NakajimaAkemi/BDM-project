@@ -1,54 +1,77 @@
-from unicodedata import name
-import warnings
-
-warnings.filterwarnings('ignore')
 import re
+from codecs import ignore_errors
+from concurrent.futures import process
+from pydoc import describe
 from typing import Union
-from haversine import haversine
-import pandas as pd
+
+import dask.dataframe as dd
 import h5py
+import numpy as np
+import pandas as pd
+# config.set(scheduler='processes', num_workers=24)
+from dask import config, optimize
+from dask.distributed import Client, LocalCluster
+from haversine import haversine
+from numpy import dtype
+from polars import col
+from pyparsing import srange
+
+from src.algorithms.algorithm import AbstractAlgorithm
 from src.algorithms.utils import timing
 from src.datasets.dataset import Dataset
-from src.algorithms.algorithm import AbstractAlgorithm
 
 
-class PandasBench(AbstractAlgorithm):
-    df_: Union[pd.DataFrame, pd.Series] = None
-    backup_: Union[pd.DataFrame, pd.Series] = None
+class DaskBench(AbstractAlgorithm):
+    df_ = None
+    backup_ = None
     ds_ : Dataset = None
-    #name = "pandas"
-    def __init__(self, name:str, mem: str = None, cpu: int = None, pipeline: bool = False):
+    name = "dask"
+    constructor_args = {}
+    
+    def __init__(self, mem: str = None, cpu: int = None, pipeline: bool = False):
+        import warnings
+
+        import dask
+
+        # Ignore all warnings
+        warnings.filterwarnings("ignore")
+
+        # Disable all Dask warnings
+        dask.config.set({'logging.distributed': 'error'})
         self.mem_ = mem
         self.cpu_ = cpu
         self.pipeline = pipeline
-        self.name = name
-
+        self.client = Client(LocalCluster(processes=True, memory_limit=None))
+        
+        
     def backup(self):
         """
         Creates a backup copy of the current dataframe
         """
-        self.backup_ = self.df_.copy()
+        self.backup_ = self.df_.copy()  # type: ignore
 
     def restore(self):
         """
         Replace the internal dataframe with the backup
         """
-        self.df_ = self.backup_.copy()
+        self.df_ = self.backup_.copy() # type: ignore
 
-    @timing
-    def get_pandas_df(self):
-        """
-        Returns the internal dataframe as a pandas dataframe
-        """
-        return self.df_
-
-    @timing
-    def load_from_pandas(self, df):
+    def load_from_pandas(self, df : pd.DataFrame)-> None :
         """
         Loads data from a pandas dataframe
         """
-        self.df_ = df
+        self.df_ = dd.from_pandas(df, npartitions=1) 
 
+    def done(self):
+        self.df_.compute()
+        self.client.close()
+
+    def get_pandas_df(self) -> pd.DataFrame:
+        """
+        Returns the internal dataframe as a pandas dataframe
+        """
+        return self.df_.compute()
+    
     @timing
     def load_dataset(self, ds: Dataset, conn=None, **kwargs):
         """
@@ -57,93 +80,92 @@ class PandasBench(AbstractAlgorithm):
         self.ds_ = ds
         path = ds.dataset_attribute.path
         format = ds.dataset_attribute.type
-        
+
         if format == "csv":
-            self.df_ = self.read_csv(path, **kwargs)
+            self.read_csv(path, **kwargs)
         elif format == "excel":
-            self.df_ = self.read_excel(path, **kwargs)
+            self.read_excel(path, **kwargs)
         elif format == "json":
-            self.df_ = self.read_json(path, **kwargs)
+            self.read_json(path, **kwargs)
         elif format == "parquet":
-            self.df_ = self.read_parquet(path, **kwargs)
+            self.read_parquet(path, **kwargs)
         elif format == "sql":
-            self.df_ = self.read_sql(path, conn, **kwargs)
+            self.read_sql(path, conn, **kwargs)
         elif format == "hdf5":
-            self.df_ = self.read_hdf5(path, **kwargs)
+            self.read_hdf5(path, **kwargs)
         elif format == "xml":
-            self.df_ = self.read_xml(path, **kwargs)
-            
+            self.read_xml(path, **kwargs)
+        
+        self.df_ = self.df_.persist()
         return self.df_
 
-    def read_sql(self, query, conn, **kwargs):
+    def read_sql(self, query, conn, **kwargs) -> dd.DataFrame:
         """
         Given a connection and a query
         creates a dataframe from the query output
         """
-        self.df_ = pd.read_sql(query, conn)
+        self.df_ = dd.read_sql(query, conn)
         return self.df_
 
-    def read_json(self, path, **kwargs):
+    def read_json(self, path, **kwargs) -> dd.DataFrame:
         """
         Read a json file
         """
-        self.df_ = pd.read_json(path, **kwargs)
+        self.df_ = dd.read_json(path, **kwargs)
         return self.df_
 
-    def read_csv(self, path, **kwargs):
+    def read_csv(self, path, **kwargs) -> dd.DataFrame:
         """
         Read a csv file
         """
-        if self.name == "pandas20":
-            self.df_ = pd.read_csv(path, **kwargs, engine='pyarrow')
-        else:
-            self.df_ = pd.read_csv(path, **kwargs)
+        self.df_ = dd.read_csv(path,nrows=30000, **kwargs)
         return self.df_
     
-    def read_hdf5(self, path, **kwargs):
+    def read_hdf5(self, path, **kwargs) -> dd.DataFrame:
         """
-        Given a connection and a query
-        creates a dataframe from the query output
+        Read a csv file
         """
         try:
-            self.df_ = pd.read_hdf(path, **kwargs)
+            self.df_ = dd.read_hdf(path, **kwargs)
         except:
             keys = list(h5py.File(path, 'r').keys())
-            store = pd.HDFStore(path)
-            self.df_ = store[keys[0]]         
-        return self.df_
+        
 
-    def read_xml(self, path, **kwargs):
+    def read_xml(self, path, **kwargs) -> dd.DataFrame:
         """
         Read a xml file
         """
-        self.df_ = pd.read_xml(path, **kwargs)
+        self.df_ = dd.from_pandas(pd.read_xml(path, **kwargs), npartitions=1)
         return self.df_
 
-    def read_excel(self, path, **kwargs):
+    def read_excel(self, path, **kwargs) -> dd.DataFrame:
         """
         Read an excel file
         """
-        self.df_ = pd.read_excel(path, **kwargs)
+        self.df_ = dd.from_pandas(pd.read_excel(path, **kwargs), npartitions=1)
         return self.df_
 
     def read_parquet(self, path, **kwargs):
         """
         Read a parquet file
         """
-        if self.name == "pandas20":
-            self.df_ = pd.read_parquet(path, **kwargs, engine='pyarrow')
-        else:
-            self.df_ = pd.read_parquet(path, **kwargs)
+        self.df_ = dd.read_parquet(path, **kwargs)
         return self.df_
 
     @timing
-    def sort(self, columns, ascending=True):
+    def sort(self, columns, ascending=True, cast=None):
         """
-        Sort the dataframe by the provided columns
-        Columns is a list of column names
+        Sort the dataframe by the provided column
         """
-        self.df_ = self.df_.sort_values(columns, ascending=ascending)
+        if cast is None:
+            cast = {}
+        if cast:
+            for column, t in cast.items():
+                self.df_ = self.cast_columns_types({column: t})
+        if len(columns) > 1:
+            print("Not implemented yet by dask for multiple columns")
+
+        self.df_ = self.df_.sort_values(by=columns[0], ascending=ascending)
         return self.df_
 
     @timing
@@ -156,9 +178,9 @@ class PandasBench(AbstractAlgorithm):
     @timing
     def is_unique(self, column):
         """
-        Check the uniqueness of all values contained in the provided column_name
+        Check the uniqueness of all values contained in all columns in the provided object
         """
-        return self.df_[column].is_unique
+        return dd.compute(self.df_[column].nunique() == self.df_.shape[0])[0]
 
     @timing
     def delete_columns(self, columns):
@@ -166,7 +188,7 @@ class PandasBench(AbstractAlgorithm):
         Delete the specified columns
         Columns is a list of column names
         """
-        self.df_ = self.df_.drop(columns=columns)
+        self.df_ = self.df_.drop(columns=columns, errors="ignore")
         return self.df_
 
     @timing
@@ -203,10 +225,11 @@ class PandasBench(AbstractAlgorithm):
         if columns is None:
             columns = []
         if len(columns) == 0:
-            self.df_ = self.df_.fillna(value)
+            self.df_ = self.df_.fillna(value)  
         else:
             for c in columns:
                 self.df_[c] = self.df_[c].fillna(value)
+        
         return self.df_
 
     @timing
@@ -215,8 +238,10 @@ class PandasBench(AbstractAlgorithm):
         Performs one-hot encoding of the provided columns
         Columns is a list of column names
         """
-        dummies = pd.get_dummies(self.df_[columns])
-        self.df_ = pd.concat([self.df_.drop(columns=columns), dummies], axis=1)
+        for c in columns:
+            self.df_[f'{c}_cat'] = self.df_[c].copy()
+            self.df_ = self.df_.categorize(columns=[f'{c}_cat'])
+            self.df_ = dd.get_dummies(self.df_, prefix=c, columns=[f'{c}_cat'])
         return self.df_
 
     @timing
@@ -237,29 +262,24 @@ class PandasBench(AbstractAlgorithm):
         on the provided column.
         Pattern could be a regular expression.
         """
-        test = self.df_[column].fillna('').str.contains(re.compile(pattern))
-        return self.df_[test]
+        return self.df_[self.df_[column].str.contains(re.compile(pattern))]
 
     @timing
-    def locate_outliers(self, column, lower_quantile=0.1, upper_quantile=0.99, **kwargs):
+    def locate_outliers(self, column, lower_quantile=0.1, upper_quantile=0.99):
         """
         Returns the rows of the dataframe that have values
         in the provided column lower or higher than the values
         of the lower/upper quantile.
-        """       
-        import numpy as np
-        
+        """
         if column == "all":
-            column = self.df_.select_dtypes(include=np.number).columns.tolist()
+            column = self.get_columns()
 
-        # Calculate the percentile values for each column
-        percentiles = np.percentile(self.df_[column].values, [(lower_quantile*100), (upper_quantile*100)], axis=0)
+        numeric_only = self.df_[column].astype("float64")
 
-        # Create boolean masks for values lower and higher than the quantile values
-        lower_mask = (self.df_[column] < percentiles[0]).any(axis=1)
-        upper_mask = (self.df_[column] > percentiles[1]).any(axis=1)
+        q_low = numeric_only.quantile(lower_quantile)
+        q_hi = numeric_only.quantile(upper_quantile)
 
-        return self.df_[lower_mask | upper_mask]
+        return numeric_only[(numeric_only < q_low) | (numeric_only > q_hi)]
 
     @timing
     def get_columns_types(self):
@@ -269,17 +289,15 @@ class PandasBench(AbstractAlgorithm):
         return self.df_.dtypes.apply(lambda x: x.name).to_dict()
 
     @timing
-    def cast_columns_types(self, dtypes):
+    def cast_columns_types(self, dtypes: dict):
         """
         Cast the data types of the provided columns
         to the provided new data types.
         dtypes is a dictionary that provide for each
         column to cast the new data type.
         """
-        for column, dtype in dtypes.items():
-            if column in self.df_.columns:
-                self.df_[column] = self.df_[column].notnull().astype(dtype)
-
+        for col, new_type in dtypes.items():
+            self.df_[col] = self.df_[col].astype(new_type)
         return self.df_
 
     @timing
@@ -294,23 +312,21 @@ class PandasBench(AbstractAlgorithm):
     @timing
     def find_mismatched_dtypes(self):
         """
-        Returns, if exists, a list of columns with mismatched data types.
-        For example, a column with string dtypes that contains only integer values.
-        For every columns the list contain an object with three keys:
-         - Col: name of the column
-         - current_dtype: current data type
-         - suggested_dtype: suggested data type
+        L'implementazione originaria non si adattava alla nostra libreria.
+        Dask interpreta i mismatch nella colonne come object, per cui facendo un rapido controllo
+        su questo tipo di dato, otteniamo le colonne che dobbiamo andare a sistemare.
+        Il risultato è un Set con due liste che riportano rispettivamente i nomi delle colonne con type=object
+        e la seconda lista i rispettivi indici.
         """
-        current_dtypes = self.get_columns_types()
-        new_dtypes = (
-            self.df_.apply(pd.to_numeric, errors="ignore")
-            .dtypes.apply(lambda x: x.name)
-            .to_dict()
-        )
+        current_dtypes = self.df_.dtypes.apply(lambda x: x.name).to_dict()
+        df1 = self.df_.copy()
+        for c in df1.columns:
+            df1[c] = dd.to_numeric(df1[c], errors="coerce")
 
-        return [{"col": k, "current_dtype": current_dtypes[k], "suggested_dtype": new_dtypes[k],} 
-                for k in current_dtypes.keys() 
-                if new_dtypes[k] != current_dtypes[k]]
+        new_dtypes = df1.dtypes.apply(lambda x: x.name).to_dict()
+        res = dd.compute({c: df1[c].isna().any() for c in df1.columns})[0]
+        return [{"col": c, "current_dtype": current_dtypes[c], "suggested_dtype": new_dtypes[c],} 
+                for c in self.df_.columns if (current_dtypes[c] != new_dtypes[c]) and not res[c]]
 
     @timing
     def check_allowed_char(self, column, pattern):
@@ -320,7 +336,7 @@ class PandasBench(AbstractAlgorithm):
         For example, if the pattern [a-z] is provided the string
         'ciao' will return true, the string 'ciao123' will return false.
         """
-        return self.df_[column].str.contains(re.compile(pattern)).all()
+        return self.df_[column].str.contains(re.compile(pattern)).compute().all()
 
     @timing
     def drop_duplicates(self):
@@ -336,8 +352,8 @@ class PandasBench(AbstractAlgorithm):
         Delete the rows where the provided pattern
         occurs in the provided column.
         """
-        matching_rows = self.search_by_pattern(column, pattern)
-        self.df_ = self.df_.drop(matching_rows.index)
+
+        self.df_ = self.df_[~self.df_[column].str.contains(re.compile(pattern))]
         return self.df_
 
     @timing
@@ -348,7 +364,7 @@ class PandasBench(AbstractAlgorithm):
         column datatype must be datetime
         An example of format is '%m/%d/%Y'
         """
-        self.df_[column] = pd.to_datetime(self.df_[column], errors='coerce', format=format)
+        self.df_[column] = dd.to_datetime(self.df_[column], errors='coerce')
         self.df_[column] = self.df_[column].dt.strftime(format)
         return self.df_
 
@@ -411,8 +427,11 @@ class PandasBench(AbstractAlgorithm):
         and the dictionary to aggregate ("sum", "mean", "count") the values for each column: {"col1": "sum"}
         (see pivot_table in pandas documentation)
         """
-        return  pd.pivot_table(
-            self.df_, index=index, values=values, columns=columns, aggfunc=aggfunc
+        if len(index) > 1:
+            index = index[0]
+        df = self.df_.categorize(columns=columns)
+        return dd.pivot_table(
+            df, index=index, values=values, columns=columns, aggfunc=aggfunc
         ).reset_index()
 
     @timing
@@ -421,7 +440,7 @@ class PandasBench(AbstractAlgorithm):
         Define the list of columns to be used as values for the variable column,
         the name for variable columns and the one for value column_name
         """
-        self.df_ = pd.melt(
+        self.df_ = dd.melt(
             self.df_,
             id_vars=list(set(list(self.df_.columns.values)) - set(columns)),
             value_vars=columns,
@@ -436,9 +455,9 @@ class PandasBench(AbstractAlgorithm):
         Delete the rows with null values for all provided Columns
         Columns is a list of column names
         """
-        if columns=="all":
-            columns = self.get_columns()
-        self.df_.dropna(subset=columns, inplace=True)
+        if columns == 'all':
+            columns = list(self.df_.columns.values)
+        self.df_ = self.df_.dropna(subset=columns)
         return self.df_
 
     @timing
@@ -473,7 +492,6 @@ class PandasBench(AbstractAlgorithm):
                 .str.normalize("NFKD")
                 .str.encode("ascii", errors="ignore")
                 .str.decode("utf-8")
-                
             )
         return self.df_
 
@@ -498,13 +516,9 @@ class PandasBench(AbstractAlgorithm):
     def calc_column(self, col_name, f, columns=None):
         """
         Calculate the new column col_name by applying
-        the function f to the whole dataframe
+        the function f
         """
-        if not columns:
-            columns = self.get_columns()
-        if type(f) == str:
-            f = eval(f)
-        self.df_[col_name] = self.df_[columns].apply(f, axis=1)
+        self.df_[col_name] = self.df_.apply(eval(f), meta=('x', 'f8'), axis=1)
         return self.df_
 
     @timing
@@ -517,26 +531,30 @@ class PandasBench(AbstractAlgorithm):
 
         The result is stored in the current dataframe.
         """
+        if type(left_on) == str:
+            left_on = [left_on]
+            right_on = [right_on]   
+        for i in range(len(left_on)):
+            if self.df_[left_on[i]].dtype != other[right_on[i]].dtype:
+                other[right_on[i]] = other[right_on[i]].astype(self.df_[left_on[i]].dtype)
+                
         self.df_ = self.df_.merge(
             other, left_on=left_on, right_on=right_on, how=how, **kwargs
         )
         return self.df_
 
     @timing
-    def groupby(self, columns, f):
+    def groupby(self, columns, f, meta=None):
         """
         Aggregate the dataframe by the provided columns
-        then applies the function f on every group
+        then applied the function f on every group
         """
+        if meta is None:
+            return self.df_.groupby(columns).agg(f)
         
-        if self.name == "pandas20":
-            try:
-                return self.df_.groupby(columns).agg(f)
-            except Exception:
-                return self.df_.dropna().groupby(columns).agg(f)
+        return self.df_.groupby(columns).apply(f, meta=meta)
         
-        return self.df_.groupby(columns).agg(f)
-    
+        #.apply(eval(f), meta={'x': 'f8', 'y': 'f8'})
 
     @timing
     def categorical_encoding(self, columns):
@@ -544,9 +562,9 @@ class PandasBench(AbstractAlgorithm):
         Convert the categorical values in these columns into numerical values
         Columns is a list of column names
         """
+        cat_df = self.df_.categorize(columns=columns)
         for column in columns:
-            self.df_[column] = self.df_[column].astype("category").cat.codes
-            #self.df_[column] = self.df_[column].cat.codes
+            self.df_[column] = cat_df[column].cat.codes
         return self.df_
 
     @timing
@@ -557,7 +575,10 @@ class PandasBench(AbstractAlgorithm):
         - if true, num is the percentage of rows to be returned
         - if false, num is the exact number of rows to be returned
         """
-        return self.df_.sample(frac=num / 100) if frac else self.df_.sample(n=num)
+        if frac:
+            return self.df_.sample(frac=num / 100)
+        f = num / len(self.df_)
+        return self.df_.sample(frac=f)
 
     @timing
     def append(self, other, ignore_index):
@@ -566,7 +587,7 @@ class PandasBench(AbstractAlgorithm):
         All columns are kept, eventually filled by nan
         Ignore index is a boolean: if true, reset row indices
         """
-        self.df_ = self.df_.append(other, ignore_index=ignore_index)
+        self.df_ = dd.concat([self.df_, other], axis=0)
         return self.df_
 
     @timing
@@ -582,7 +603,7 @@ class PandasBench(AbstractAlgorithm):
         return self.df_
 
     @timing
-    def edit(self, columns, func):
+    def edit(self, columns, func, meta=''):
         """
         Edit the values of the cells in the provided columns using the provided expression
         Columns is a list of column names
@@ -590,7 +611,7 @@ class PandasBench(AbstractAlgorithm):
         if type(func) == str:
             func = eval(func)
         for c in columns:
-            self.df_[c] = self.df_[c].apply(func)
+            self.df_[c] = self.df_[c].map(func, meta = eval(meta))
         return self.df_
 
     @timing
@@ -598,13 +619,18 @@ class PandasBench(AbstractAlgorithm):
         """
         Set the cell identified by index and column to the provided value
         """
-        self.df_.at[index, column] = value
+
+        def set_val(df):
+            df.at[index, column] = value
+
+        self.df_.map_partitions(set_val).compute()
+
         return self.df_
 
     @timing
     def min_max_scaling(self, columns, min, max):
         """
-        Independently scale the values in each provided column in the range (min, max)
+        Independently scale the values in each provided column in the range (0, 1)
         Columns is a list of column names
         """
         for column in columns:
@@ -628,31 +654,27 @@ class PandasBench(AbstractAlgorithm):
         Return a list of duplicate columns, if exists.
         Duplicate columns are those which have same values for each row.
         """
+        import dask.array as da
+        
+        def equals(a, b):
+            return np.array_equal(a, b)
+        
         cols = self.df_.columns.values
         return [(cols[i], cols[j]) 
                 for i in range(len(cols)) 
                 for j in range(i + 1, len(cols)) 
-                if self.df_[cols[i]].equals(self.df_[cols[j]])]
+                if da.map_blocks(equals, self.df_[cols[i]].values, self.df_[cols[j]].values).all()]
 
     @timing
-    def to_csv(self, path="./pipeline_output/pandas_output.csv", **kwargs):
+    def to_csv(self, path=f"/pipeline_output/{name}_loan_output_*.csv", **kwargs):
         """
         Export the dataframe in a csv file.
         """
-        # check if the results folder exists
         import os
-        if not os.path.exists("pipeline_output"):
-            os.makedirs("pipeline_output")
-        
-        self.df_.to_csv(path, **kwargs)
+        if not os.path.exists("./pipeline_output"):
+            os.makedirs("./pipeline_output")
+        self.df_.to_csv(f"/pipeline_output/{self.name}_output.csv", **kwargs)
 
-    @timing
-    def to_parquet(self, path="./pipeline_output/pandas_output.parquet", **kwargs):
-        """
-        Export the dataframe in a csv file.
-        """
-        self.df_.to_parquet(path, **kwargs)
-        
     @timing
     def query(self, query, inplace=False):
         """
@@ -664,26 +686,26 @@ class PandasBench(AbstractAlgorithm):
         if inplace:
             self.df_ = self.df_.query(query)
             return self.df_
-        return self.df_.query(query)
+        return self.df_.query(query, meta=self.df_.dtypes)
     
     @timing
-    def loc(self, column_list, row_condition=None):
+    def loc(self, column_list,row_condition=None,):
         # ‘(self.df_.date > pd.Timestamp(2024-01-30))’   
         if type(row_condition) is str: 
             row_condition = eval(row_condition)
         if row_condition is None:
             self.df_ = self.df_.loc[:, column_list]
         elif column_list is None:
-            self.df_ = self.df_.loc[row_condition] 
+            self.df_ = self.df_.loc[column_list] 
         else:
             self.df_ = self.df_.loc[row_condition, column_list]
-        return self.df_
-
-    def force_execution(self):
-        pass
+        return self.df_   
     
-    def done(self):
-        pass
+    def force_execution(self):
+
+        #self.df_ = optimize(self.df_)
+        self.df_.compute()
         
+    @timing
     def set_construtor_args(self, args):
         pass
